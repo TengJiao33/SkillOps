@@ -3,6 +3,25 @@ body,
 #root {
   margin: 0;
   padding: 0;
-  height: 100%;
-  width: 100%;
+  min-height: 100%;
+}
+
+body {
+  color: #1f2a37;
+  font-family:
+    'LXGW WenKai',
+    'HarmonyOS Sans SC',
+    'Source Han Sans SC',
+    'PingFang SC',
+    'Microsoft YaHei',
+    sans-serif;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+::selection {
+  background: rgba(0, 151, 167, 0.24);
 }

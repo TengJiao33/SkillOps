@@ -1,303 +1,631 @@
-import { useState, type DragEvent, useEffect, useCallback } from 'react';
-import { AppShell, Burger, Group, Text, Button, Modal, Textarea, Stack, Menu, ActionIcon, TextInput } from '@mantine/core';
-import { useDisclosure } from '@mantine/hooks';
-import { IconDeviceFloppy, IconFolderOpen, IconTrash } from '@tabler/icons-react';
+import { useEffect, useMemo, useState } from 'react';
 import {
-  ReactFlow,
-  Background,
-  Controls,
-  ReactFlowProvider,
-  useReactFlow,
-  applyNodeChanges,
-  applyEdgeChanges,
-  addEdge,
-  ControlButton,
-  type Node,
-  type Edge,
-  type OnNodesChange,
-  type OnEdgesChange,
-  type OnConnect,
-} from '@xyflow/react';
-import '@xyflow/react/dist/style.css';
+  ActionIcon,
+  AppShell,
+  Badge,
+  Button,
+  Card,
+  Container,
+  Divider,
+  Grid,
+  Group,
+  NumberInput,
+  ScrollArea,
+  Select,
+  Stack,
+  Switch,
+  Table,
+  Text,
+  TextInput,
+  Textarea,
+  Title,
+} from '@mantine/core';
+import {
+  IconCopy,
+  IconDeviceFloppy,
+  IconFlask2,
+  IconPlus,
+  IconRefresh,
+  IconTrash,
+} from '@tabler/icons-react';
 
-import TaskNode from './components/TaskNode';
-import RoleNode from './components/RoleNode';
-import FormatNode from './components/FormatNode';
+import { averageScore, runAllPromptTests } from './domain/evaluation';
+import {
+  createEmptyInputs,
+  extractVariableNames,
+  mergeVariableDefinitions,
+} from './domain/template';
+import { createVersion, diffVersions } from './domain/versioning';
+import { loadPromptLabState, savePromptLabState } from './storage/promptLabStorage';
+import type {
+  PromptLabState,
+  PromptRunResult,
+  PromptTestCase,
+  VariableDefinition,
+} from './types/promptLab';
+import './App.css';
 
-// --- 全局类型和常量定义 ---
-export type NodeData = {
-  text: string;
-  onDataChange?: (data: { text: string }) => void;
-};
-type Flow = {
-  nodes: Node<NodeData>[];
-  edges: Edge[];
-};
-const nodeTypes = { task: TaskNode, role: RoleNode, format: FormatNode };
-const LOCAL_STORAGE_FLOWS_KEY = 'ideaverse-flows';
+const DEFAULT_TEMPLATE = `你是{{role}}。
+请围绕目标「{{goal}}」输出一套可执行方案。
+最终内容必须使用{{output_format}}，并包含验收标准与风险提醒。`;
 
-// --- 画布组件 ---
-type FlowCanvasProps = {
-  nodes: Node<NodeData>[];
-  edges: Edge[];
-  onNodesChange: OnNodesChange;
-  onEdgesChange: OnEdgesChange;
-  onConnect: OnConnect;
-};
-function FlowCanvas({ nodes, edges, onNodesChange, onEdgesChange, onConnect }: FlowCanvasProps) {
-  return (
-    <div style={{ height: '100%', width: '100%' }}>
-      <ReactFlow
-        nodes={nodes}
-        edges={edges}
-        nodeTypes={nodeTypes}
-        onNodesChange={onNodesChange}
-        onEdgesChange={onEdgesChange}
-        onConnect={onConnect}
-        fitView
-      >
-        <Background />
-        <Controls showInteractive={false} />
-      </ReactFlow>
-    </div>
-  );
+function createDefaultState(): PromptLabState {
+  const variableNames = extractVariableNames(DEFAULT_TEMPLATE);
+  const variables = mergeVariableDefinitions(variableNames, []);
+  const testCase: PromptTestCase = {
+    id: 'case-1',
+    name: '新用户留存方案',
+    inputs: {
+      ...createEmptyInputs(variableNames),
+      role: '资深增长产品经理',
+      goal: '提升新用户首周留存率',
+      output_format: 'Markdown 列表',
+    },
+    requiredPhrases: ['验收标准', '风险提醒'],
+    forbiddenPhrases: ['我不能', '抱歉'],
+    minLength: 120,
+    maxLength: 2000,
+  };
+
+  return {
+    template: DEFAULT_TEMPLATE,
+    variables,
+    testCases: [testCase],
+    versions: [],
+  };
 }
 
-// --- Editor 组件 ---
-type EditorProps = FlowCanvasProps & {
-  setNodes: React.Dispatch<React.SetStateAction<Node<NodeData>[]>>;
-};
-function Editor({ nodes, edges, onNodesChange, onEdgesChange, onConnect, setNodes }: EditorProps) {
-  const reactFlowInstance = useReactFlow();
-
-  // --- 修复核心 2.1 ---
-  // onNodeDataChange 函数现在只负责更新状态，不再需要useEffect来辅助
-  const onNodeDataChange = useCallback((nodeId: string, newData: { text: string }) => {
-    setNodes((prevNodes) =>
-      prevNodes.map((node) =>
-        node.id === nodeId ? { ...node, data: { ...node.data, ...newData } } : node
-      )
-    );
-  }, [setNodes]);
-
-  // --- 修复核心 2.2 ---
-  // 这个有问题的 useEffect 被彻底移除，因为它的逻辑现在被合并到了 onDrop 和初始加载中
-
-  const onDrop = useCallback((event: DragEvent) => {
-    event.preventDefault();
-    const type = event.dataTransfer.getData('application/reactflow');
-    if (!type || !reactFlowInstance) return;
-
-    const position = reactFlowInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY });
-    const newId = `node_${Date.now()}`;
-    
-    // --- 修复核心 2.3 ---
-    // 创建新节点时，直接将 onDataChange 函数赋予它
-    const newNode: Node<NodeData> = {
-      id: newId,
-      type,
-      position,
-      data: { text: '', onDataChange: (data) => onNodeDataChange(newId, data) },
-    };
-    setNodes((nds) => nds.concat(newNode));
-  }, [reactFlowInstance, setNodes, onNodeDataChange]);
-
-  return (
-    <div style={{ height: 'calc(100vh - 60px)', width: '100%' }} onDrop={onDrop} onDragOver={(e) => e.preventDefault()}>
-      <FlowCanvas nodes={nodes} edges={edges} onNodesChange={onNodesChange} onEdgesChange={onEdgesChange} onConnect={onConnect} />
-    </div>
-  );
+function splitLines(input: string): string[] {
+  return input
+    .split('\n')
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
 }
 
-// --- App 组件 ---
+function joinLines(lines: string[]): string {
+  return lines.join('\n');
+}
+
+function syncCaseInputs(testCase: PromptTestCase, variableNames: string[]): PromptTestCase {
+  const nextInputs = createEmptyInputs(variableNames);
+  for (const name of variableNames) {
+    nextInputs[name] = testCase.inputs[name] ?? '';
+  }
+  return { ...testCase, inputs: nextInputs };
+}
+
+function createTestCase(variableNames: string[], index: number): PromptTestCase {
+  return {
+    id: `case-${Date.now()}-${index}`,
+    name: `测试用例 ${index + 1}`,
+    inputs: createEmptyInputs(variableNames),
+    requiredPhrases: [],
+    forbiddenPhrases: [],
+    minLength: undefined,
+    maxLength: undefined,
+  };
+}
+
+function toOptionalNumber(value: string | number): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  return undefined;
+}
+
+function scoreColor(score: number): string {
+  if (score >= 80) return 'teal';
+  if (score >= 60) return 'orange';
+  return 'red';
+}
+
 function App() {
-  const [opened, { toggle }] = useDisclosure();
-  const [nodes, setNodes] = useState<Node<NodeData>[]>([]);
-  const [edges, setEdges] = useState<Edge[]>([]);
-  const [savedFlows, setSavedFlows] = useState<{ [key: string]: Flow }>({});
-  const [flowName, setFlowName] = useState('');
-  const [saveModalOpened, { open: openSaveModal, close: closeSaveModal }] = useDisclosure(false);
-  const [resultModalOpened, { open: openResultModal, close: closeResultModal }] = useDisclosure(false);
-  const [variableModalOpened, { open: openVariableModal, close: closeVariableModal }] = useDisclosure(false);
-  const [promptResult, setPromptResult] = useState('');
-  const [promptVariables, setPromptVariables] = useState<string[]>([]);
-  const [variableValues, setVariableValues] = useState<{ [key: string]: string }>({});
-  const [promptTemplate, setPromptTemplate] = useState('');
-  
-  // onNodeDataChange 现在提升到了 App 组件，但我们只在 Editor 中定义和使用它，
-  // 为了简化，我们直接在加载和创建节点时附加一个临时的函数引用。
-  // 正确的做法是将 onNodeDataChange 的完整定义也提升上来，但目前的修复方式更直接。
+  const [template, setTemplate] = useState(DEFAULT_TEMPLATE);
+  const [variables, setVariables] = useState<VariableDefinition[]>([]);
+  const [testCases, setTestCases] = useState<PromptTestCase[]>([]);
+  const [versions, setVersions] = useState<PromptLabState['versions']>([]);
+  const [runResults, setRunResults] = useState<PromptRunResult[]>([]);
+  const [selectedResultCaseId, setSelectedResultCaseId] = useState('');
+  const [versionName, setVersionName] = useState('');
+  const [baseVersionId, setBaseVersionId] = useState<string | null>(null);
+  const [targetVersionId, setTargetVersionId] = useState<string | null>(null);
+  const [isHydrated, setIsHydrated] = useState(false);
 
   useEffect(() => {
-    const flows = JSON.parse(localStorage.getItem(LOCAL_STORAGE_FLOWS_KEY) || '{}');
-    setSavedFlows(flows);
-
-    // 初始加载逻辑
-    if (Object.keys(flows).length === 0) {
-      setNodes([{
-        id: '1', type: 'task', position: { x: 100, y: 100 },
-        data: { text: '写一篇关于{{主题}}的介绍文章。'},
-      }]);
-    }
+    const loaded = loadPromptLabState(createDefaultState());
+    setTemplate(loaded.template);
+    setVariables(loaded.variables);
+    setTestCases(loaded.testCases);
+    setVersions(loaded.versions);
+    setIsHydrated(true);
   }, []);
 
-  const handleSaveFlow = () => {
-    if (!flowName.trim()) { alert('请输入流程名称！'); return; }
-    const serializableNodes = nodes.map(node => ({ ...node, data: { text: node.data.text } }));
-    const newFlows = { ...savedFlows, [flowName]: { nodes: serializableNodes, edges } };
-    setSavedFlows(newFlows);
-    localStorage.setItem(LOCAL_STORAGE_FLOWS_KEY, JSON.stringify(newFlows));
-    closeSaveModal();
-    setFlowName('');
-    alert(`流程 "${flowName}" 已保存！`);
+  useEffect(() => {
+    if (!isHydrated) return;
+    savePromptLabState({ template, variables, testCases, versions });
+  }, [isHydrated, template, variables, testCases, versions]);
+
+  useEffect(() => {
+    if (versions.length === 0) {
+      setBaseVersionId(null);
+      setTargetVersionId(null);
+      return;
+    }
+    if (!baseVersionId) setBaseVersionId(versions[0].id);
+    if (!targetVersionId && versions.length > 1) setTargetVersionId(versions[1].id);
+  }, [versions, baseVersionId, targetVersionId]);
+
+  const variableNames = useMemo(() => variables.map((item) => item.name), [variables]);
+
+  const templateStats = useMemo(() => {
+    const trimmed = template.trim();
+    return {
+      charCount: trimmed.length,
+      lineCount: trimmed ? trimmed.split('\n').length : 0,
+    };
+  }, [template]);
+
+  const selectedResult = useMemo(
+    () => runResults.find((item) => item.testCaseId === selectedResultCaseId),
+    [runResults, selectedResultCaseId],
+  );
+
+  const overallScore = useMemo(() => averageScore(runResults), [runResults]);
+
+  const versionOptions = useMemo(
+    () =>
+      versions.map((item) => ({
+        value: item.id,
+        label: `${item.name} (${new Date(item.createdAt).toLocaleString()})`,
+      })),
+    [versions],
+  );
+
+  const baseVersion = useMemo(
+    () => versions.find((item) => item.id === baseVersionId),
+    [versions, baseVersionId],
+  );
+  const targetVersion = useMemo(
+    () => versions.find((item) => item.id === targetVersionId),
+    [versions, targetVersionId],
+  );
+  const comparison = useMemo(() => {
+    if (!baseVersion || !targetVersion || baseVersion.id === targetVersion.id) return null;
+    return diffVersions(baseVersion, targetVersion);
+  }, [baseVersion, targetVersion]);
+
+  const handleSyncVariables = () => {
+    const extractedNames = extractVariableNames(template);
+    const nextVariables = mergeVariableDefinitions(extractedNames, variables);
+    setVariables(nextVariables);
+    setTestCases((current) => current.map((item) => syncCaseInputs(item, extractedNames)));
   };
 
-  const handleLoadFlow = (name: string) => {
-    const flowToLoad = savedFlows[name];
-    if (flowToLoad) {
-      setNodes(flowToLoad.nodes);
-      setEdges(flowToLoad.edges);
-    }
+  const handleVariableChange = (
+    name: string,
+    updater: (current: VariableDefinition) => VariableDefinition,
+  ) => {
+    setVariables((current) => current.map((item) => (item.name === name ? updater(item) : item)));
   };
 
-  const handleDeleteFlow = (name: string) => {
-    if (window.confirm(`确定要删除流程 "${name}" 吗？`)) {
-      const newFlows = { ...savedFlows };
-      delete newFlows[name];
-      setSavedFlows(newFlows);
-      localStorage.setItem(LOCAL_STORAGE_FLOWS_KEY, JSON.stringify(newFlows));
-    }
+  const handleTestCaseChange = (
+    testCaseId: string,
+    updater: (current: PromptTestCase) => PromptTestCase,
+  ) => {
+    setTestCases((current) => current.map((item) => (item.id === testCaseId ? updater(item) : item)));
   };
 
-  const handleGeneratePrompt = () => {
-    const startNode = nodes.find(node => !edges.some(edge => edge.target === node.id));
-    if (!startNode) { alert("没有找到起始节点!"); return; }
-    const orderedNodes: Node<NodeData>[] = [];
-    let currentNode: Node<NodeData> | undefined = startNode;
-    while (currentNode) {
-      orderedNodes.push(currentNode);
-      const nextEdge = edges.find(edge => edge.source === currentNode!.id);
-      currentNode = nextEdge ? nodes.find(node => node.id === nextEdge.target) : undefined;
-    }
-    const template = orderedNodes.map(node => node.data.text).join('\n\n---\n\n');
-    const variableRegex = /\{\{([^}]+)\}\}/g;
-    const variables = [...new Set(Array.from(template.matchAll(variableRegex), match => match[1].trim()))];
-    if (variables.length > 0) {
-      setPromptTemplate(template);
-      setPromptVariables(variables);
-      setVariableValues(Object.fromEntries(variables.map(v => [v, ''])));
-      openVariableModal();
-    } else {
-      setPromptResult(template);
-      openResultModal();
-    }
+  const handleAddTestCase = () => {
+    setTestCases((current) => [...current, createTestCase(variableNames, current.length)]);
   };
 
-  const onNodesChange: OnNodesChange = useCallback((changes) => setNodes((nds) => applyNodeChanges(changes, nds) as Node<NodeData>[]), []);
-  const onEdgesChange: OnEdgesChange = useCallback((changes) => setEdges((eds) => applyEdgeChanges(changes, eds)), []);
-  const onConnect: OnConnect = useCallback((connection) => setEdges((eds) => addEdge(connection, eds)), []);
-  
-  // --- 修复核心 1.1 ---
-  // 修正 onDragStart 函数，使其只接收一个 event 参数
-  const onDragStart = (event: React.DragEvent<HTMLButtonElement>) => {
-    const nodeType = event.currentTarget.dataset.nodetype;
-    if (nodeType) {
-        event.dataTransfer.setData('application/reactflow', nodeType);
-        event.dataTransfer.effectAllowed = 'move';
-    }
+  const handleDeleteTestCase = (testCaseId: string) => {
+    setTestCases((current) => current.filter((item) => item.id !== testCaseId));
+    setRunResults((current) => current.filter((item) => item.testCaseId !== testCaseId));
+    if (selectedResultCaseId === testCaseId) setSelectedResultCaseId('');
   };
-  
+
+  const handleRunTests = () => {
+    const results = runAllPromptTests(template, variables, testCases);
+    setRunResults(results);
+    setSelectedResultCaseId(results[0]?.testCaseId ?? '');
+  };
+
+  const handleSaveVersion = () => {
+    const nextVersion = createVersion(versionName, template, variables);
+    setVersions((current) => [nextVersion, ...current]);
+    setVersionName('');
+  };
+
   return (
-    <>
-      <AppShell header={{ height: 60 }} navbar={{ width: 300, breakpoint: 'sm', collapsed: { mobile: !opened } }} padding="md">
-        <AppShell.Header>
-          <Group h="100%" px="md" justify="space-between">
-            <Group>
-              <Burger opened={opened} onClick={toggle} hiddenFrom="sm" size="sm" />
-              <Text size="lg" fw={700}>Ideaverse</Text>
+    <AppShell header={{ height: 88 }} padding={0}>
+      <AppShell.Header className="lab-header">
+        <Container size="xl" h="100%">
+          <Group justify="space-between" h="100%" wrap="wrap" gap="sm">
+            <Group gap="sm">
+              <div>
+                <Title order={3} className="lab-title">
+                  提示词工程台
+                </Title>
+                <Text size="sm" c="dimmed">
+                  模板可复用，用例可验证，版本可对比
+                </Text>
+              </div>
+              <Badge variant="light" color="teal">
+                变量 {variables.length}
+              </Badge>
+              <Badge variant="light" color="orange">
+                用例 {testCases.length}
+              </Badge>
+              <Badge variant="filled" color={runResults.length > 0 ? scoreColor(overallScore) : 'gray'}>
+                平均得分 {runResults.length > 0 ? `${overallScore}%` : '未运行'}
+              </Badge>
             </Group>
-            <Group>
-              <Button leftSection={<IconDeviceFloppy size={14} />} onClick={openSaveModal}>保存</Button>
-              <Menu shadow="md" width={200}>
-                <Menu.Target>
-                  <Button variant="default" rightSection={<IconFolderOpen size={14} />}>加载流程</Button>
-                </Menu.Target>
-                <Menu.Dropdown>
-                  {Object.keys(savedFlows).length > 0 ? (
-                    Object.keys(savedFlows).map((name) => (
-                      <Menu.Item
-                        key={name}
-                        onClick={() => handleLoadFlow(name)}
-                        rightSection={
-                          <ActionIcon color="red" size="xs" variant="transparent" onClick={(e) => { e.stopPropagation(); handleDeleteFlow(name); }}>
-                            <IconTrash size={14} />
-                          </ActionIcon>
-                        }
-                      >
-                        {name}
-                      </Menu.Item>
-                    ))
-                  ) : ( <Menu.Item disabled>没有已保存的流程</Menu.Item> )}
-                </Menu.Dropdown>
-              </Menu>
-              <ControlButton onClick={handleGeneratePrompt} title="生成Prompt">🚀</ControlButton>
+            <Group className="action-group">
+              <Button
+                variant="default"
+                className="action-btn"
+                leftSection={<IconRefresh size={16} />}
+                onClick={handleSyncVariables}
+              >
+                同步变量
+              </Button>
+              <Button
+                variant="default"
+                className="action-btn"
+                leftSection={<IconDeviceFloppy size={16} />}
+                onClick={handleSaveVersion}
+              >
+                保存版本
+              </Button>
+              <Button
+                color="teal"
+                className="action-btn run-btn"
+                leftSection={<IconFlask2 size={16} />}
+                onClick={handleRunTests}
+              >
+                运行验证
+              </Button>
             </Group>
           </Group>
-        </AppShell.Header>
-        
-        <AppShell.Navbar p="md">
-            <Text mb="md">拖拽节点到画布上:</Text>
-            {/* --- 修复核心 1.2 --- */}
-            {/* 为每个按钮添加 data-nodetype 属性，并使用同一个 onDragStart 函数 */}
-            <Button draggable onDragStart={onDragStart} data-nodetype="task" fullWidth mb="sm">任务指令节点</Button>
-            <Button draggable onDragStart={onDragStart} data-nodetype="role" fullWidth mb="sm" variant="outline">角色扮演节点</Button>
-            <Button draggable onDragStart={onDragStart} data-nodetype="format" fullWidth variant="light">格式要求节点</Button>
-        </AppShell.Navbar>
+        </Container>
+      </AppShell.Header>
 
-        <AppShell.Main>
-          <ReactFlowProvider>
-            <Editor
-              nodes={nodes}
-              edges={edges}
-              onNodesChange={onNodesChange}
-              onEdgesChange={onEdgesChange}
-              onConnect={onConnect}
-              setNodes={setNodes}
-            />
-          </ReactFlowProvider>
-        </AppShell.Main>
-      </AppShell>
+      <AppShell.Main className="lab-main">
+        <div className="orb orb-a" />
+        <div className="orb orb-b" />
+        <Container size="xl" py="md">
+          <Grid gutter="md">
+            <Grid.Col span={{ base: 12, lg: 8 }}>
+              <Stack gap="md">
+                <Card className="lab-card reveal reveal-1" withBorder radius="lg" p="lg">
+                  <Stack gap="sm">
+                    <Group justify="space-between">
+                      <Title order={4}>模板编辑区</Title>
+                      <Text size="sm" c="dimmed">
+                        使用 {`{{变量名}}`} 占位符
+                      </Text>
+                    </Group>
+                    <Group gap="xs">
+                      <Badge variant="light" color="cyan">
+                        字符 {templateStats.charCount}
+                      </Badge>
+                      <Badge variant="light" color="blue">
+                        行数 {templateStats.lineCount}
+                      </Badge>
+                    </Group>
+                    <Textarea
+                      className="template-editor"
+                      value={template}
+                      onChange={(event) => setTemplate(event.currentTarget.value)}
+                      minRows={16}
+                      autosize={false}
+                    />
+                  </Stack>
+                </Card>
 
-      <Modal opened={saveModalOpened} onClose={closeSaveModal} title="保存当前流程" centered>
-        <TextInput label="流程名称" placeholder="请输入流程名称..." value={flowName} onChange={(event) => setFlowName(event.currentTarget.value)} data-autofocus />
-        <Button fullWidth onClick={handleSaveFlow} mt="md">确认保存</Button>
-      </Modal>
+                <Card className="lab-card reveal reveal-2" withBorder radius="lg" p="lg">
+                  <Stack gap="sm">
+                    <Title order={4}>变量契约</Title>
+                    <Table withTableBorder striped highlightOnHover>
+                      <Table.Thead>
+                        <Table.Tr>
+                          <Table.Th>变量名</Table.Th>
+                          <Table.Th>必填</Table.Th>
+                          <Table.Th>默认值</Table.Th>
+                          <Table.Th>说明</Table.Th>
+                        </Table.Tr>
+                      </Table.Thead>
+                      <Table.Tbody>
+                        {variables.map((variable) => (
+                          <Table.Tr key={variable.name}>
+                            <Table.Td>
+                              <Text fw={600}>{variable.name}</Text>
+                            </Table.Td>
+                            <Table.Td>
+                              <Switch
+                                checked={variable.required}
+                                onChange={(event) =>
+                                  handleVariableChange(variable.name, (current) => ({
+                                    ...current,
+                                    required: event.currentTarget.checked,
+                                  }))
+                                }
+                              />
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput
+                                value={variable.defaultValue}
+                                onChange={(event) =>
+                                  handleVariableChange(variable.name, (current) => ({
+                                    ...current,
+                                    defaultValue: event.currentTarget.value,
+                                  }))
+                                }
+                              />
+                            </Table.Td>
+                            <Table.Td>
+                              <TextInput
+                                value={variable.description}
+                                onChange={(event) =>
+                                  handleVariableChange(variable.name, (current) => ({
+                                    ...current,
+                                    description: event.currentTarget.value,
+                                  }))
+                                }
+                              />
+                            </Table.Td>
+                          </Table.Tr>
+                        ))}
+                      </Table.Tbody>
+                    </Table>
+                  </Stack>
+                </Card>
+              </Stack>
+            </Grid.Col>
 
-      <Modal opened={resultModalOpened} onClose={closeResultModal} title="生成的Prompt" size="lg" centered>
-        <Textarea value={promptResult} autosize minRows={10} readOnly />
-        <Button onClick={() => navigator.clipboard.writeText(promptResult)} mt="md" fullWidth>复制到剪贴板</Button>
-      </Modal>
+            <Grid.Col span={{ base: 12, lg: 4 }}>
+              <Stack gap="md">
+                <Card className="lab-card reveal reveal-2" withBorder radius="lg" p="lg">
+                  <Stack gap="sm">
+                    <Group justify="space-between">
+                      <Title order={4}>测试用例</Title>
+                      <Button
+                        size="xs"
+                        leftSection={<IconPlus size={14} />}
+                        variant="light"
+                        onClick={handleAddTestCase}
+                      >
+                        新增用例
+                      </Button>
+                    </Group>
+                    <ScrollArea h={440}>
+                      <Stack gap="sm">
+                        {testCases.map((testCase) => (
+                          <Card withBorder radius="md" key={testCase.id} className="case-card">
+                            <Stack gap="sm">
+                              <Group justify="space-between" align="flex-start">
+                                <TextInput
+                                  label="用例名称"
+                                  value={testCase.name}
+                                  onChange={(event) =>
+                                    handleTestCaseChange(testCase.id, (current) => ({
+                                      ...current,
+                                      name: event.currentTarget.value,
+                                    }))
+                                  }
+                                  style={{ flex: 1 }}
+                                />
+                                <ActionIcon
+                                  mt={24}
+                                  color="red"
+                                  variant="light"
+                                  onClick={() => handleDeleteTestCase(testCase.id)}
+                                >
+                                  <IconTrash size={14} />
+                                </ActionIcon>
+                              </Group>
 
-      <Modal opened={variableModalOpened} onClose={closeVariableModal} title="请填写模板变量" size="md" centered>
-        <Stack>
-          {promptVariables.map((variable) => (
-            <Textarea key={variable} label={variable} placeholder={`请输入 "${variable}" 的内容...`} value={variableValues[variable] || ''} onChange={(event) => setVariableValues(current => ({ ...current, [variable]: event.currentTarget.value }))} autosize minRows={2} required />
-          ))}
-          <Button
-            onClick={() => {
-              let finalPrompt = promptTemplate;
-              for (const variable in variableValues) { finalPrompt = finalPrompt.replace(new RegExp(`\\{\\{\\s*${variable}\\s*\\}\\}`, 'g'), variableValues[variable]); }
-              setPromptResult(finalPrompt);
-              closeVariableModal();
-              openResultModal();
-            }}
-            mt="md"
-          >
-            生成最终Prompt
-          </Button>
-        </Stack>
-      </Modal>
-    </>
+                              <Divider label="输入参数" />
+                              <Grid gutter="xs">
+                                {variables.map((variable) => (
+                                  <Grid.Col span={12} key={`${testCase.id}-${variable.name}`}>
+                                    <TextInput
+                                      label={variable.name}
+                                      value={testCase.inputs[variable.name] ?? ''}
+                                      onChange={(event) =>
+                                        handleTestCaseChange(testCase.id, (current) => ({
+                                          ...current,
+                                          inputs: {
+                                            ...current.inputs,
+                                            [variable.name]: event.currentTarget.value,
+                                          },
+                                        }))
+                                      }
+                                    />
+                                  </Grid.Col>
+                                ))}
+                              </Grid>
+
+                              <Textarea
+                                label="必须包含短语（每行一个）"
+                                value={joinLines(testCase.requiredPhrases)}
+                                onChange={(event) =>
+                                  handleTestCaseChange(testCase.id, (current) => ({
+                                    ...current,
+                                    requiredPhrases: splitLines(event.currentTarget.value),
+                                  }))
+                                }
+                                minRows={2}
+                              />
+                              <Textarea
+                                label="禁止包含短语（每行一个）"
+                                value={joinLines(testCase.forbiddenPhrases)}
+                                onChange={(event) =>
+                                  handleTestCaseChange(testCase.id, (current) => ({
+                                    ...current,
+                                    forbiddenPhrases: splitLines(event.currentTarget.value),
+                                  }))
+                                }
+                                minRows={2}
+                              />
+                              <Group grow>
+                                <NumberInput
+                                  label="最小长度"
+                                  min={0}
+                                  value={testCase.minLength}
+                                  onChange={(value) =>
+                                    handleTestCaseChange(testCase.id, (current) => ({
+                                      ...current,
+                                      minLength: toOptionalNumber(value),
+                                    }))
+                                  }
+                                />
+                                <NumberInput
+                                  label="最大长度"
+                                  min={0}
+                                  value={testCase.maxLength}
+                                  onChange={(value) =>
+                                    handleTestCaseChange(testCase.id, (current) => ({
+                                      ...current,
+                                      maxLength: toOptionalNumber(value),
+                                    }))
+                                  }
+                                />
+                              </Group>
+                              {typeof testCase.minLength === 'number' &&
+                                typeof testCase.maxLength === 'number' &&
+                                testCase.maxLength < testCase.minLength && (
+                                  <Text size="xs" c="red">
+                                    长度规则异常：最大长度小于最小长度
+                                  </Text>
+                                )}
+                            </Stack>
+                          </Card>
+                        ))}
+                      </Stack>
+                    </ScrollArea>
+                  </Stack>
+                </Card>
+
+                <Card className="lab-card reveal reveal-3" withBorder radius="lg" p="lg">
+                  <Stack gap="sm">
+                    <Title order={4}>运行结果</Title>
+                    {runResults.length === 0 ? (
+                      <Text size="sm" c="dimmed">
+                        暂无运行结果，点击右上角“运行验证”开始评估。
+                      </Text>
+                    ) : (
+                      <>
+                        <Table withTableBorder striped highlightOnHover>
+                          <Table.Thead>
+                            <Table.Tr>
+                              <Table.Th>用例</Table.Th>
+                              <Table.Th>得分</Table.Th>
+                              <Table.Th>通过项</Table.Th>
+                            </Table.Tr>
+                          </Table.Thead>
+                          <Table.Tbody>
+                            {runResults.map((result) => {
+                              const testCase = testCases.find((item) => item.id === result.testCaseId);
+                              const passedCount = result.checks.filter((item) => item.passed).length;
+                              return (
+                                <Table.Tr
+                                  key={result.testCaseId}
+                                  onClick={() => setSelectedResultCaseId(result.testCaseId)}
+                                  className={
+                                    selectedResultCaseId === result.testCaseId
+                                      ? 'selected-result-row'
+                                      : undefined
+                                  }
+                                >
+                                  <Table.Td>{testCase?.name ?? result.testCaseId}</Table.Td>
+                                  <Table.Td>{result.score}%</Table.Td>
+                                  <Table.Td>{`${passedCount}/${result.checks.length}`}</Table.Td>
+                                </Table.Tr>
+                              );
+                            })}
+                          </Table.Tbody>
+                        </Table>
+
+                        {selectedResult && (
+                          <Card withBorder radius="md" className="preview-card">
+                            <Stack gap="sm">
+                              <Group justify="space-between">
+                                <Text fw={600}>选中结果预览</Text>
+                                <Button
+                                  size="xs"
+                                  variant="light"
+                                  leftSection={<IconCopy size={14} />}
+                                  onClick={() => navigator.clipboard.writeText(selectedResult.renderedPrompt)}
+                                >
+                                  复制结果
+                                </Button>
+                              </Group>
+                              <Textarea value={selectedResult.renderedPrompt} minRows={6} readOnly />
+                              <Stack gap={4}>
+                                {selectedResult.checks.map((check) => (
+                                  <Text size="sm" key={`${selectedResult.testCaseId}-${check.id}`}>
+                                    {check.passed ? '通过' : '失败'} | {check.label}
+                                    {check.detail ? ` | ${check.detail}` : ''}
+                                  </Text>
+                                ))}
+                              </Stack>
+                            </Stack>
+                          </Card>
+                        )}
+                      </>
+                    )}
+                  </Stack>
+                </Card>
+
+                <Card className="lab-card reveal reveal-3" withBorder radius="lg" p="lg">
+                  <Stack gap="sm">
+                    <Title order={4}>版本管理</Title>
+                    <TextInput
+                      label="新版本名称"
+                      placeholder="例如：v1.2 加强输出约束"
+                      value={versionName}
+                      onChange={(event) => setVersionName(event.currentTarget.value)}
+                    />
+                    <Text size="sm" c="dimmed">
+                      已保存版本：{versions.length}
+                    </Text>
+                    <Group grow>
+                      <Select
+                        label="基准版本"
+                        data={versionOptions}
+                        value={baseVersionId}
+                        onChange={setBaseVersionId}
+                        placeholder="选择基准"
+                      />
+                      <Select
+                        label="对比版本"
+                        data={versionOptions}
+                        value={targetVersionId}
+                        onChange={setTargetVersionId}
+                        placeholder="选择对比"
+                      />
+                    </Group>
+                    {comparison ? (
+                      <Stack gap={4}>
+                        <Text size="sm">模板变化：{comparison.templateChanged ? '有' : '无'}</Text>
+                        <Text size="sm">新增变量：{comparison.addedVariables.join('、') || '无'}</Text>
+                        <Text size="sm">删除变量：{comparison.removedVariables.join('、') || '无'}</Text>
+                      </Stack>
+                    ) : (
+                      <Text size="sm" c="dimmed">
+                        请选择两个不同版本以查看差异。
+                      </Text>
+                    )}
+                  </Stack>
+                </Card>
+              </Stack>
+            </Grid.Col>
+          </Grid>
+        </Container>
+      </AppShell.Main>
+    </AppShell>
   );
 }
 
