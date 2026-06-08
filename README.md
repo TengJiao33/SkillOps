@@ -1,114 +1,107 @@
-# 提示词工程台（Prompt Lab）
+# SkillOps Studio
 
-一个本地优先（local-first）的提示词工程工作台，用于解决 Prompt 开发中最常见的三个问题：
+A local-first workbench for authoring, evaluating, versioning, and hardening Agent Skills before they enter real agent workflows.
 
-- 复用困难：Prompt 只能复制粘贴，难以模板化
-- 验证困难：改了一版 Prompt，不知道是变好还是变差
-- 迭代困难：缺少版本比较与回归基线
+SkillOps Studio started as a lightweight prompt QA tool. It is now oriented around the emerging Agent Skills pattern: a portable `SKILL.md` manifest plus instructions, scripts, references, assets, eval cases, and regression snapshots.
 
-本项目不是“可视化拼接玩具”，而是一个轻量 Prompt QA 工具。
+## Product Direction
 
-## 项目目标
+Agent Skills are becoming a reusable capability layer for coding agents and workflow agents. They are more structured than prompts, lighter than model fine-tuning, and complementary to tools or MCP servers.
 
-让团队可以围绕同一个 Prompt 模板完成完整闭环：
+This app focuses on the practical middle layer:
 
-1. 模板化（Template + Variables）
-2. 批量验证（Test Cases + Checks）
-3. 版本化（Version Snapshot + Diff）
-4. 持续迭代（Regression-aware）
+- Author a standards-friendly Agent Skill draft.
+- Generate a copyable `SKILL.md`.
+- Track bundled scripts, references, and assets.
+- Define eval cases with expected outcomes, assertions, and evidence requirements.
+- Run lightweight readiness checks without calling a model API.
+- Save snapshots and compare score, metadata, instruction, and resource changes.
 
-## 当前功能
+## What It Does Today
 
-- 模板编辑：支持 `{{变量名}}` 占位符
-- 变量契约：必填、默认值、说明
-- 测试用例：多用例输入、必含短语、禁用短语、长度限制
-- 结果评估：逐项校验 + 得分
-- 版本管理：保存版本、对比模板变化与变量变化
-- 本地持久化：自动存储到浏览器 `localStorage`
+- Skill manifest editor for `name`, `description`, `compatibility`, `allowed-tools`, and instruction body.
+- Generated `SKILL.md` preview with copy-to-clipboard.
+- Resource inventory for `scripts/`, `references/`, and `assets/`.
+- Eval case editor for realistic user requests, expected outcomes, assertions, and required evidence.
+- Deterministic readiness checks for routing clarity, workflow structure, validation language, eval quality, resource completeness, and risky-action review language.
+- Version snapshots with average score and lightweight diff.
+- Browser `localStorage` persistence.
 
-## 页面说明
+## What It Does Not Do Yet
 
-- 模板编辑区：编写 Prompt 模板并查看字数/行数
-- 变量契约：管理每个变量的输入规则
-- 测试用例：维护不同业务场景的输入与约束
-- 运行结果：查看每个用例得分和失败原因，支持复制结果
-- 版本管理：保存当前模板并进行版本差异比较
+- It does not execute an agent or call a model API.
+- It does not run bundled scripts.
+- It does not sandbox third-party skills.
+- It does not perform trace-driven automatic skill revision.
+- It does not import or export full skill folders yet.
 
-## 快速开始
+Those are intentionally left out of the current refactor because they need deeper debugging, security review, or runtime design.
 
-### 1) 安装依赖
+## Quick Start
+
+### Install dependencies
 
 ```bash
 npm install
 ```
 
-### 2) 启动开发环境
+### Start the development server
 
 ```bash
 npm run dev
 ```
 
-默认访问地址：
+The default Vite URL is:
 
-`http://localhost:5173`
+```text
+http://localhost:5173
+```
 
-### 3) 代码检查与构建
+### Check and build
 
 ```bash
 npm run lint
 npm run build
 ```
 
-## 技术栈
+## Tech Stack
 
 - React 19
 - TypeScript
 - Vite
 - Mantine UI
+- Tabler Icons
 
-## 目录结构（核心）
+## Core Structure
 
 ```text
 src/
-  App.tsx                      # 页面编排与交互入口
+  App.tsx                         Main SkillOps Studio interface
   domain/
-    template.ts                # 变量提取、模板渲染
-    evaluation.ts              # 规则检查、得分计算
-    versioning.ts              # 版本快照与差异计算
+    skillEvaluation.ts            SKILL.md generation and readiness checks
+    skillVersioning.ts            Skill snapshot and diff logic
   storage/
-    promptLabStorage.ts        # localStorage 读写
+    skillOpsStorage.ts            localStorage persistence
   types/
-    promptLab.ts               # 领域类型定义
+    skillOps.ts                   Skill, eval, result, and version types
 ```
 
-## 协作与交接
+The previous prompt-oriented modules were removed during the SkillOps refactor.
 
-请先阅读：
+## Suggested Next Steps
 
-1. `README.md`（本文件）
-2. `ENGINEERING_HANDOFF.md`（完整重构待办、实现计划、验收标准）
+1. Add Vitest coverage for `skillEvaluation.ts` and `skillVersioning.ts`.
+2. Add JSON import/export for the full workspace state.
+3. Add Agent Skills folder export: `SKILL.md`, `scripts/`, `references/`, and `assets/`.
+4. Add run history and baseline comparison across eval iterations.
+5. Add a stronger static security linter for risky commands, network calls, dependency installation, and credential handling.
+6. Add optional trace-driven revision once real agent run logs are available.
 
-## 已知边界
+## North Star
 
-- 当前为本地优先，不含后端同步
-- 当前不直接调用模型 API
-- 校验规则以文本规则为主，后续可扩展为自定义评估器
+SkillOps Studio should become a lightweight CI surface for Agent Skills:
 
-## 后续规划（简版）
-
-- 引入测试框架并补齐领域层单元测试
-- 增加运行历史、基线版本、回归分数对比
-- 支持 JSON 导入导出与数据迁移
-- 增加团队协作能力（云端存储/共享）
-
----
-
-如果你是新接手工程师，建议先跑一遍本地流程：
-
-1. 编辑模板
-2. 同步变量
-3. 新建测试用例
-4. 运行验证
-5. 保存版本并对比
-
-完成以上 5 步后，再进入下一阶段重构。
+- Every skill is portable.
+- Every workflow has eval cases.
+- Every change is comparable.
+- Every regression is visible before the skill is used by an agent.

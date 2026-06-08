@@ -4,146 +4,172 @@ import {
   AppShell,
   Badge,
   Button,
-  Card,
   Container,
-  Divider,
   Grid,
   Group,
-  NumberInput,
   ScrollArea,
   Select,
   Stack,
-  Switch,
-  Table,
+  Tabs,
   Text,
   TextInput,
   Textarea,
   Title,
 } from '@mantine/core';
 import {
+  IconClipboard,
   IconCopy,
   IconDeviceFloppy,
   IconFlask2,
+  IconGitCompare,
   IconPlus,
-  IconRefresh,
   IconTrash,
 } from '@tabler/icons-react';
 
-import { averageScore, runAllPromptTests } from './domain/evaluation';
 import {
-  createEmptyInputs,
-  extractVariableNames,
-  mergeVariableDefinitions,
-} from './domain/template';
-import { createVersion, diffVersions } from './domain/versioning';
-import { loadPromptLabState, savePromptLabState } from './storage/promptLabStorage';
+  averageScore,
+  createSkillMarkdown,
+  runAllSkillEvals,
+} from './domain/skillEvaluation';
+import { createSkillVersion, diffSkillVersions } from './domain/skillVersioning';
+import { loadSkillOpsState, saveSkillOpsState } from './storage/skillOpsStorage';
 import type {
-  PromptLabState,
-  PromptRunResult,
-  PromptTestCase,
-  VariableDefinition,
-} from './types/promptLab';
+  SkillDraft,
+  SkillEvalCase,
+  SkillEvalResult,
+  SkillOpsState,
+  SkillResource,
+  SkillResourceKind,
+} from './types/skillOps';
 import './App.css';
 
-const DEFAULT_TEMPLATE = `你是{{role}}。
-请围绕目标「{{goal}}」输出一套可执行方案。
-最终内容必须使用{{output_format}}，并包含验收标准与风险提醒。`;
+const DEFAULT_SKILL: SkillDraft = {
+  name: 'repository-release-review',
+  description:
+    'Use this skill when reviewing a repository change for release readiness, PR handoff quality, and regression evidence.',
+  compatibility: 'codex, claude-code, agent-skills',
+  allowedTools: 'shell, apply_patch, git',
+  body: `# Repository Release Review
 
-function createDefaultState(): PromptLabState {
-  const variableNames = extractVariableNames(DEFAULT_TEMPLATE);
-  const variables = mergeVariableDefinitions(variableNames, []);
-  const testCase: PromptTestCase = {
-    id: 'case-1',
-    name: '新用户留存方案',
-    inputs: {
-      ...createEmptyInputs(variableNames),
-      role: '资深增长产品经理',
-      goal: '提升新用户首周留存率',
-      output_format: 'Markdown 列表',
+## Workflow
+1. Inspect the repository status, changed files, and recent commits.
+2. Identify runtime, API, dependency, documentation, and test-surface changes.
+3. Run the smallest verification stack that gives meaningful confidence.
+4. Compare the result against the release checklist and note any unresolved risk.
+
+## Validation
+- Include concrete evidence from commands, files, or diffs.
+- Do not mark the work ready if required checks fail.
+- Call out skipped checks with a reason and residual risk.
+
+## Output
+Return a concise release-readiness summary with blockers, verification evidence, and next actions.`,
+  resources: [
+    {
+      id: 'resource-1',
+      kind: 'reference',
+      path: 'references/release-checklist.md',
+      purpose: 'Release criteria and handoff expectations.',
     },
-    requiredPhrases: ['验收标准', '风险提醒'],
-    forbiddenPhrases: ['我不能', '抱歉'],
-    minLength: 120,
-    maxLength: 2000,
-  };
+    {
+      id: 'resource-2',
+      kind: 'script',
+      path: 'scripts/collect-change-summary.ts',
+      purpose: 'Optional helper for summarizing changed files and commits.',
+    },
+  ],
+};
 
+const DEFAULT_EVAL_CASES: SkillEvalCase[] = [
+  {
+    id: 'eval-1',
+    name: 'Release candidate handoff',
+    userRequest:
+      'Review the current repository changes and tell me whether this release candidate is ready to ship.',
+    expectedOutcome:
+      'A release-readiness summary with blockers, verification evidence, skipped checks, and concrete next actions.',
+    assertions: [
+      'The output separates blockers from non-blocking risks.',
+      'The output cites verification evidence or explains why checks were skipped.',
+      'The output does not claim release readiness when required checks fail.',
+    ],
+    requiredEvidence: ['git status or diff summary', 'test/build command results'],
+  },
+  {
+    id: 'eval-2',
+    name: 'PR summary preparation',
+    userRequest:
+      'Prepare a pull request handoff for the current branch, including what changed and how it was verified.',
+    expectedOutcome:
+      'A concise PR title and description with changed areas, verification, and follow-up risks.',
+    assertions: [
+      'The output includes a clear PR title.',
+      'The output lists changed areas without inventing files.',
+      'The output includes verification evidence.',
+    ],
+    requiredEvidence: ['changed file list', 'recent commits or diff stats'],
+  },
+];
+
+function createDefaultState(): SkillOpsState {
   return {
-    template: DEFAULT_TEMPLATE,
-    variables,
-    testCases: [testCase],
+    skill: DEFAULT_SKILL,
+    evalCases: DEFAULT_EVAL_CASES,
     versions: [],
   };
 }
 
-function splitLines(input: string): string[] {
-  return input
+function createId(prefix: string): string {
+  return `${prefix}-${Date.now()}-${Math.round(Math.random() * 10000)}`;
+}
+
+function splitLines(value: string): string[] {
+  return value
     .split('\n')
     .map((item) => item.trim())
-    .filter((item) => item.length > 0);
+    .filter(Boolean);
 }
 
-function joinLines(lines: string[]): string {
-  return lines.join('\n');
-}
-
-function syncCaseInputs(testCase: PromptTestCase, variableNames: string[]): PromptTestCase {
-  const nextInputs = createEmptyInputs(variableNames);
-  for (const name of variableNames) {
-    nextInputs[name] = testCase.inputs[name] ?? '';
-  }
-  return { ...testCase, inputs: nextInputs };
-}
-
-function createTestCase(variableNames: string[], index: number): PromptTestCase {
-  return {
-    id: `case-${Date.now()}-${index}`,
-    name: `测试用例 ${index + 1}`,
-    inputs: createEmptyInputs(variableNames),
-    requiredPhrases: [],
-    forbiddenPhrases: [],
-    minLength: undefined,
-    maxLength: undefined,
-  };
-}
-
-function toOptionalNumber(value: string | number): number | undefined {
-  if (typeof value === 'number') {
-    return Number.isFinite(value) ? value : undefined;
-  }
-  return undefined;
+function joinLines(values: string[]): string {
+  return values.join('\n');
 }
 
 function scoreColor(score: number): string {
-  if (score >= 80) return 'teal';
-  if (score >= 60) return 'orange';
+  if (score >= 85) return 'dark';
+  if (score >= 65) return 'yellow';
   return 'red';
 }
 
+function resourceLabel(kind: SkillResourceKind): string {
+  if (kind === 'script') return 'Script';
+  if (kind === 'asset') return 'Asset';
+  return 'Reference';
+}
+
 function App() {
-  const [template, setTemplate] = useState(DEFAULT_TEMPLATE);
-  const [variables, setVariables] = useState<VariableDefinition[]>([]);
-  const [testCases, setTestCases] = useState<PromptTestCase[]>([]);
-  const [versions, setVersions] = useState<PromptLabState['versions']>([]);
-  const [runResults, setRunResults] = useState<PromptRunResult[]>([]);
-  const [selectedResultCaseId, setSelectedResultCaseId] = useState('');
+  const [skill, setSkill] = useState<SkillDraft>(DEFAULT_SKILL);
+  const [evalCases, setEvalCases] = useState<SkillEvalCase[]>(DEFAULT_EVAL_CASES);
+  const [versions, setVersions] = useState<SkillOpsState['versions']>([]);
+  const [runResults, setRunResults] = useState<SkillEvalResult[]>([]);
+  const [selectedEvalId, setSelectedEvalId] = useState(DEFAULT_EVAL_CASES[0].id);
   const [versionName, setVersionName] = useState('');
   const [baseVersionId, setBaseVersionId] = useState<string | null>(null);
   const [targetVersionId, setTargetVersionId] = useState<string | null>(null);
   const [isHydrated, setIsHydrated] = useState(false);
 
   useEffect(() => {
-    const loaded = loadPromptLabState(createDefaultState());
-    setTemplate(loaded.template);
-    setVariables(loaded.variables);
-    setTestCases(loaded.testCases);
+    const loaded = loadSkillOpsState(createDefaultState());
+    setSkill(loaded.skill);
+    setEvalCases(loaded.evalCases);
     setVersions(loaded.versions);
+    setSelectedEvalId(loaded.evalCases[0]?.id ?? '');
     setIsHydrated(true);
   }, []);
 
   useEffect(() => {
     if (!isHydrated) return;
-    savePromptLabState({ template, variables, testCases, versions });
-  }, [isHydrated, template, variables, testCases, versions]);
+    saveSkillOpsState({ skill, evalCases, versions });
+  }, [isHydrated, skill, evalCases, versions]);
 
   useEffect(() => {
     if (versions.length === 0) {
@@ -151,476 +177,542 @@ function App() {
       setTargetVersionId(null);
       return;
     }
+
     if (!baseVersionId) setBaseVersionId(versions[0].id);
     if (!targetVersionId && versions.length > 1) setTargetVersionId(versions[1].id);
   }, [versions, baseVersionId, targetVersionId]);
 
-  const variableNames = useMemo(() => variables.map((item) => item.name), [variables]);
-
-  const templateStats = useMemo(() => {
-    const trimmed = template.trim();
-    return {
-      charCount: trimmed.length,
-      lineCount: trimmed ? trimmed.split('\n').length : 0,
-    };
-  }, [template]);
-
-  const selectedResult = useMemo(
-    () => runResults.find((item) => item.testCaseId === selectedResultCaseId),
-    [runResults, selectedResultCaseId],
-  );
-
+  const skillMarkdown = useMemo(() => createSkillMarkdown(skill), [skill]);
   const overallScore = useMemo(() => averageScore(runResults), [runResults]);
-
+  const selectedEval = useMemo(
+    () => evalCases.find((item) => item.id === selectedEvalId),
+    [evalCases, selectedEvalId],
+  );
+  const selectedResult = useMemo(
+    () => runResults.find((item) => item.evalCaseId === selectedEvalId),
+    [runResults, selectedEvalId],
+  );
   const versionOptions = useMemo(
     () =>
-      versions.map((item) => ({
-        value: item.id,
-        label: `${item.name} (${new Date(item.createdAt).toLocaleString()})`,
+      versions.map((version) => ({
+        value: version.id,
+        label: `${version.name} (${version.averageScore}%)`,
       })),
     [versions],
   );
+  const versionDiff = useMemo(() => {
+    const base = versions.find((version) => version.id === baseVersionId);
+    const target = versions.find((version) => version.id === targetVersionId);
 
-  const baseVersion = useMemo(
-    () => versions.find((item) => item.id === baseVersionId),
-    [versions, baseVersionId],
-  );
-  const targetVersion = useMemo(
-    () => versions.find((item) => item.id === targetVersionId),
-    [versions, targetVersionId],
-  );
-  const comparison = useMemo(() => {
-    if (!baseVersion || !targetVersion || baseVersion.id === targetVersion.id) return null;
-    return diffVersions(baseVersion, targetVersion);
-  }, [baseVersion, targetVersion]);
+    if (!base || !target || base.id === target.id) {
+      return null;
+    }
 
-  const handleSyncVariables = () => {
-    const extractedNames = extractVariableNames(template);
-    const nextVariables = mergeVariableDefinitions(extractedNames, variables);
-    setVariables(nextVariables);
-    setTestCases((current) => current.map((item) => syncCaseInputs(item, extractedNames)));
+    return diffSkillVersions(base, target);
+  }, [baseVersionId, targetVersionId, versions]);
+
+  const updateSkill = (patch: Partial<SkillDraft>) => {
+    setSkill((current) => ({ ...current, ...patch }));
   };
 
-  const handleVariableChange = (
-    name: string,
-    updater: (current: VariableDefinition) => VariableDefinition,
-  ) => {
-    setVariables((current) => current.map((item) => (item.name === name ? updater(item) : item)));
+  const updateResource = (resourceId: string, patch: Partial<SkillResource>) => {
+    setSkill((current) => ({
+      ...current,
+      resources: current.resources.map((resource) =>
+        resource.id === resourceId ? { ...resource, ...patch } : resource,
+      ),
+    }));
   };
 
-  const handleTestCaseChange = (
-    testCaseId: string,
-    updater: (current: PromptTestCase) => PromptTestCase,
-  ) => {
-    setTestCases((current) => current.map((item) => (item.id === testCaseId ? updater(item) : item)));
+  const addResource = () => {
+    setSkill((current) => ({
+      ...current,
+      resources: [
+        ...current.resources,
+        {
+          id: createId('resource'),
+          kind: 'reference',
+          path: '',
+          purpose: '',
+        },
+      ],
+    }));
   };
 
-  const handleAddTestCase = () => {
-    setTestCases((current) => [...current, createTestCase(variableNames, current.length)]);
+  const deleteResource = (resourceId: string) => {
+    setSkill((current) => ({
+      ...current,
+      resources: current.resources.filter((resource) => resource.id !== resourceId),
+    }));
   };
 
-  const handleDeleteTestCase = (testCaseId: string) => {
-    setTestCases((current) => current.filter((item) => item.id !== testCaseId));
-    setRunResults((current) => current.filter((item) => item.testCaseId !== testCaseId));
-    if (selectedResultCaseId === testCaseId) setSelectedResultCaseId('');
+  const updateEvalCase = (evalCaseId: string, patch: Partial<SkillEvalCase>) => {
+    setEvalCases((current) =>
+      current.map((evalCase) =>
+        evalCase.id === evalCaseId ? { ...evalCase, ...patch } : evalCase,
+      ),
+    );
   };
 
-  const handleRunTests = () => {
-    const results = runAllPromptTests(template, variables, testCases);
+  const addEvalCase = () => {
+    const nextEvalCase: SkillEvalCase = {
+      id: createId('eval'),
+      name: `Eval case ${evalCases.length + 1}`,
+      userRequest: '',
+      expectedOutcome: '',
+      assertions: [],
+      requiredEvidence: [],
+    };
+
+    setEvalCases((current) => [...current, nextEvalCase]);
+    setSelectedEvalId(nextEvalCase.id);
+  };
+
+  const deleteEvalCase = (evalCaseId: string) => {
+    setEvalCases((current) => current.filter((evalCase) => evalCase.id !== evalCaseId));
+    setRunResults((current) => current.filter((result) => result.evalCaseId !== evalCaseId));
+
+    if (selectedEvalId === evalCaseId) {
+      const fallback = evalCases.find((evalCase) => evalCase.id !== evalCaseId);
+      setSelectedEvalId(fallback?.id ?? '');
+    }
+  };
+
+  const runEvaluations = () => {
+    const results = runAllSkillEvals(skill, evalCases);
     setRunResults(results);
-    setSelectedResultCaseId(results[0]?.testCaseId ?? '');
+    setSelectedEvalId(results[0]?.evalCaseId ?? '');
   };
 
-  const handleSaveVersion = () => {
-    const nextVersion = createVersion(versionName, template, variables);
+  const saveVersion = () => {
+    const snapshotResults = runResults.length > 0 ? runResults : runAllSkillEvals(skill, evalCases);
+    const nextVersion = createSkillVersion(versionName, skill, snapshotResults);
     setVersions((current) => [nextVersion, ...current]);
     setVersionName('');
   };
 
   return (
-    <AppShell header={{ height: 88 }} padding={0}>
-      <AppShell.Header className="lab-header">
+    <AppShell header={{ height: 76 }} padding={0}>
+      <AppShell.Header className="studio-header">
         <Container size="xl" h="100%">
           <Group justify="space-between" h="100%" wrap="wrap" gap="sm">
             <Group gap="sm">
-              <div>
-                <Title order={3} className="lab-title">
-                  提示词工程台
-                </Title>
-                <Text size="sm" c="dimmed">
-                  模板可复用，用例可验证，版本可对比
-                </Text>
-              </div>
-              <Badge variant="light" color="teal">
-                变量 {variables.length}
+              <Title order={3} className="studio-title">
+                SkillOps Studio
+              </Title>
+              <Badge variant="light" color="gray">
+                Agent Skill lifecycle
               </Badge>
               <Badge variant="light" color="orange">
-                用例 {testCases.length}
+                Evals {evalCases.length}
               </Badge>
-              <Badge variant="filled" color={runResults.length > 0 ? scoreColor(overallScore) : 'gray'}>
-                平均得分 {runResults.length > 0 ? `${overallScore}%` : '未运行'}
+              <Badge variant="filled" color={runResults.length ? scoreColor(overallScore) : 'gray'}>
+                Score {runResults.length ? `${overallScore}%` : 'Not run'}
               </Badge>
             </Group>
-            <Group className="action-group">
+
+            <Group className="toolbar">
               <Button
                 variant="default"
-                className="action-btn"
-                leftSection={<IconRefresh size={16} />}
-                onClick={handleSyncVariables}
+                leftSection={<IconClipboard size={16} />}
+                onClick={() => void navigator.clipboard.writeText(skillMarkdown)}
               >
-                同步变量
+                Copy SKILL.md
               </Button>
               <Button
                 variant="default"
-                className="action-btn"
                 leftSection={<IconDeviceFloppy size={16} />}
-                onClick={handleSaveVersion}
+                onClick={saveVersion}
               >
-                保存版本
+                Snapshot
               </Button>
               <Button
-                color="teal"
-                className="action-btn run-btn"
+                color="dark"
                 leftSection={<IconFlask2 size={16} />}
-                onClick={handleRunTests}
+                onClick={runEvaluations}
               >
-                运行验证
+                Run Evals
               </Button>
             </Group>
           </Group>
         </Container>
       </AppShell.Header>
 
-      <AppShell.Main className="lab-main">
-        <div className="orb orb-a" />
-        <div className="orb orb-b" />
+      <AppShell.Main className="studio-main">
         <Container size="xl" py="md">
           <Grid gutter="md">
-            <Grid.Col span={{ base: 12, lg: 8 }}>
+            <Grid.Col span={{ base: 12, lg: 7 }}>
               <Stack gap="md">
-                <Card className="lab-card reveal reveal-1" withBorder radius="lg" p="lg">
-                  <Stack gap="sm">
-                    <Group justify="space-between">
-                      <Title order={4}>模板编辑区</Title>
+                <section className="studio-panel">
+                  <Group justify="space-between" align="flex-start" mb="sm">
+                    <div>
+                      <Title order={4}>Skill Manifest</Title>
                       <Text size="sm" c="dimmed">
-                        使用 {`{{变量名}}`} 占位符
+                        Standard Agent Skill draft
                       </Text>
-                    </Group>
-                    <Group gap="xs">
-                      <Badge variant="light" color="cyan">
-                        字符 {templateStats.charCount}
-                      </Badge>
-                      <Badge variant="light" color="blue">
-                        行数 {templateStats.lineCount}
-                      </Badge>
-                    </Group>
-                    <Textarea
-                      className="template-editor"
-                      value={template}
-                      onChange={(event) => setTemplate(event.currentTarget.value)}
-                      minRows={16}
-                      autosize={false}
-                    />
-                  </Stack>
-                </Card>
+                    </div>
+                    <Badge color="orange" variant="light">
+                      {skill.resources.length} resources
+                    </Badge>
+                  </Group>
 
-                <Card className="lab-card reveal reveal-2" withBorder radius="lg" p="lg">
-                  <Stack gap="sm">
-                    <Title order={4}>变量契约</Title>
-                    <Table withTableBorder striped highlightOnHover>
-                      <Table.Thead>
-                        <Table.Tr>
-                          <Table.Th>变量名</Table.Th>
-                          <Table.Th>必填</Table.Th>
-                          <Table.Th>默认值</Table.Th>
-                          <Table.Th>说明</Table.Th>
-                        </Table.Tr>
-                      </Table.Thead>
-                      <Table.Tbody>
-                        {variables.map((variable) => (
-                          <Table.Tr key={variable.name}>
-                            <Table.Td>
-                              <Text fw={600}>{variable.name}</Text>
-                            </Table.Td>
-                            <Table.Td>
-                              <Switch
-                                checked={variable.required}
-                                onChange={(event) =>
-                                  handleVariableChange(variable.name, (current) => ({
-                                    ...current,
-                                    required: event.currentTarget.checked,
-                                  }))
-                                }
-                              />
-                            </Table.Td>
-                            <Table.Td>
-                              <TextInput
-                                value={variable.defaultValue}
-                                onChange={(event) =>
-                                  handleVariableChange(variable.name, (current) => ({
-                                    ...current,
-                                    defaultValue: event.currentTarget.value,
-                                  }))
-                                }
-                              />
-                            </Table.Td>
-                            <Table.Td>
-                              <TextInput
-                                value={variable.description}
-                                onChange={(event) =>
-                                  handleVariableChange(variable.name, (current) => ({
-                                    ...current,
-                                    description: event.currentTarget.value,
-                                  }))
-                                }
-                              />
-                            </Table.Td>
-                          </Table.Tr>
-                        ))}
-                      </Table.Tbody>
-                    </Table>
-                  </Stack>
-                </Card>
+                  <Grid gutter="sm">
+                    <Grid.Col span={{ base: 12, sm: 6 }}>
+                      <TextInput
+                        label="Name"
+                        value={skill.name}
+                        onChange={(event) => updateSkill({ name: event.currentTarget.value })}
+                      />
+                    </Grid.Col>
+                    <Grid.Col span={{ base: 12, sm: 6 }}>
+                      <TextInput
+                        label="Compatibility"
+                        value={skill.compatibility}
+                        onChange={(event) =>
+                          updateSkill({ compatibility: event.currentTarget.value })
+                        }
+                      />
+                    </Grid.Col>
+                    <Grid.Col span={12}>
+                      <Textarea
+                        label="Description"
+                        value={skill.description}
+                        minRows={2}
+                        autosize
+                        onChange={(event) =>
+                          updateSkill({ description: event.currentTarget.value })
+                        }
+                      />
+                    </Grid.Col>
+                    <Grid.Col span={12}>
+                      <TextInput
+                        label="Allowed tools"
+                        value={skill.allowedTools}
+                        onChange={(event) =>
+                          updateSkill({ allowedTools: event.currentTarget.value })
+                        }
+                      />
+                    </Grid.Col>
+                    <Grid.Col span={12}>
+                      <Textarea
+                        label="Instructions"
+                        className="skill-editor"
+                        value={skill.body}
+                        minRows={16}
+                        autosize={false}
+                        onChange={(event) => updateSkill({ body: event.currentTarget.value })}
+                      />
+                    </Grid.Col>
+                  </Grid>
+                </section>
+
+                <section className="studio-panel">
+                  <Group justify="space-between" mb="sm">
+                    <Title order={4}>Generated SKILL.md</Title>
+                    <Button
+                      size="xs"
+                      variant="light"
+                      leftSection={<IconCopy size={14} />}
+                      onClick={() => void navigator.clipboard.writeText(skillMarkdown)}
+                    >
+                      Copy
+                    </Button>
+                  </Group>
+                  <Textarea value={skillMarkdown} minRows={12} autosize={false} readOnly />
+                </section>
               </Stack>
             </Grid.Col>
 
-            <Grid.Col span={{ base: 12, lg: 4 }}>
+            <Grid.Col span={{ base: 12, lg: 5 }}>
               <Stack gap="md">
-                <Card className="lab-card reveal reveal-2" withBorder radius="lg" p="lg">
-                  <Stack gap="sm">
-                    <Group justify="space-between">
-                      <Title order={4}>测试用例</Title>
-                      <Button
-                        size="xs"
-                        leftSection={<IconPlus size={14} />}
-                        variant="light"
-                        onClick={handleAddTestCase}
-                      >
-                        新增用例
-                      </Button>
-                    </Group>
-                    <ScrollArea h={440}>
-                      <Stack gap="sm">
-                        {testCases.map((testCase) => (
-                          <Card withBorder radius="md" key={testCase.id} className="case-card">
-                            <Stack gap="sm">
-                              <Group justify="space-between" align="flex-start">
-                                <TextInput
-                                  label="用例名称"
-                                  value={testCase.name}
-                                  onChange={(event) =>
-                                    handleTestCaseChange(testCase.id, (current) => ({
-                                      ...current,
-                                      name: event.currentTarget.value,
-                                    }))
-                                  }
-                                  style={{ flex: 1 }}
-                                />
-                                <ActionIcon
-                                  mt={24}
-                                  color="red"
-                                  variant="light"
-                                  onClick={() => handleDeleteTestCase(testCase.id)}
-                                >
-                                  <IconTrash size={14} />
-                                </ActionIcon>
-                              </Group>
+                <section className="studio-panel">
+                  <Group justify="space-between" mb="sm">
+                    <Title order={4}>Eval Cases</Title>
+                    <Button
+                      size="xs"
+                      variant="light"
+                      leftSection={<IconPlus size={14} />}
+                      onClick={addEvalCase}
+                    >
+                      Add
+                    </Button>
+                  </Group>
 
-                              <Divider label="输入参数" />
-                              <Grid gutter="xs">
-                                {variables.map((variable) => (
-                                  <Grid.Col span={12} key={`${testCase.id}-${variable.name}`}>
-                                    <TextInput
-                                      label={variable.name}
-                                      value={testCase.inputs[variable.name] ?? ''}
-                                      onChange={(event) =>
-                                        handleTestCaseChange(testCase.id, (current) => ({
-                                          ...current,
-                                          inputs: {
-                                            ...current.inputs,
-                                            [variable.name]: event.currentTarget.value,
-                                          },
-                                        }))
-                                      }
-                                    />
-                                  </Grid.Col>
-                                ))}
-                              </Grid>
+                  <div className="eval-list">
+                    {evalCases.map((evalCase) => {
+                      const result = runResults.find((item) => item.evalCaseId === evalCase.id);
+                      const isSelected = selectedEvalId === evalCase.id;
 
-                              <Textarea
-                                label="必须包含短语（每行一个）"
-                                value={joinLines(testCase.requiredPhrases)}
-                                onChange={(event) =>
-                                  handleTestCaseChange(testCase.id, (current) => ({
-                                    ...current,
-                                    requiredPhrases: splitLines(event.currentTarget.value),
-                                  }))
-                                }
-                                minRows={2}
-                              />
-                              <Textarea
-                                label="禁止包含短语（每行一个）"
-                                value={joinLines(testCase.forbiddenPhrases)}
-                                onChange={(event) =>
-                                  handleTestCaseChange(testCase.id, (current) => ({
-                                    ...current,
-                                    forbiddenPhrases: splitLines(event.currentTarget.value),
-                                  }))
-                                }
-                                minRows={2}
-                              />
-                              <Group grow>
-                                <NumberInput
-                                  label="最小长度"
-                                  min={0}
-                                  value={testCase.minLength}
-                                  onChange={(value) =>
-                                    handleTestCaseChange(testCase.id, (current) => ({
-                                      ...current,
-                                      minLength: toOptionalNumber(value),
-                                    }))
-                                  }
-                                />
-                                <NumberInput
-                                  label="最大长度"
-                                  min={0}
-                                  value={testCase.maxLength}
-                                  onChange={(value) =>
-                                    handleTestCaseChange(testCase.id, (current) => ({
-                                      ...current,
-                                      maxLength: toOptionalNumber(value),
-                                    }))
-                                  }
-                                />
-                              </Group>
-                              {typeof testCase.minLength === 'number' &&
-                                typeof testCase.maxLength === 'number' &&
-                                testCase.maxLength < testCase.minLength && (
-                                  <Text size="xs" c="red">
-                                    长度规则异常：最大长度小于最小长度
-                                  </Text>
-                                )}
-                            </Stack>
-                          </Card>
-                        ))}
-                      </Stack>
-                    </ScrollArea>
-                  </Stack>
-                </Card>
+                      return (
+                        <button
+                          className={`eval-item${isSelected ? ' eval-item-selected' : ''}`}
+                          key={evalCase.id}
+                          type="button"
+                          onClick={() => setSelectedEvalId(evalCase.id)}
+                        >
+                          <span>{evalCase.name}</span>
+                          <Badge size="sm" color={result ? scoreColor(result.score) : 'gray'}>
+                            {result ? `${result.score}%` : 'Draft'}
+                          </Badge>
+                        </button>
+                      );
+                    })}
+                  </div>
 
-                <Card className="lab-card reveal reveal-3" withBorder radius="lg" p="lg">
-                  <Stack gap="sm">
-                    <Title order={4}>运行结果</Title>
-                    {runResults.length === 0 ? (
-                      <Text size="sm" c="dimmed">
-                        暂无运行结果，点击右上角“运行验证”开始评估。
-                      </Text>
-                    ) : (
-                      <>
-                        <Table withTableBorder striped highlightOnHover>
-                          <Table.Thead>
-                            <Table.Tr>
-                              <Table.Th>用例</Table.Th>
-                              <Table.Th>得分</Table.Th>
-                              <Table.Th>通过项</Table.Th>
-                            </Table.Tr>
-                          </Table.Thead>
-                          <Table.Tbody>
-                            {runResults.map((result) => {
-                              const testCase = testCases.find((item) => item.id === result.testCaseId);
-                              const passedCount = result.checks.filter((item) => item.passed).length;
-                              return (
-                                <Table.Tr
-                                  key={result.testCaseId}
-                                  onClick={() => setSelectedResultCaseId(result.testCaseId)}
-                                  className={
-                                    selectedResultCaseId === result.testCaseId
-                                      ? 'selected-result-row'
-                                      : undefined
-                                  }
-                                >
-                                  <Table.Td>{testCase?.name ?? result.testCaseId}</Table.Td>
-                                  <Table.Td>{result.score}%</Table.Td>
-                                  <Table.Td>{`${passedCount}/${result.checks.length}`}</Table.Td>
-                                </Table.Tr>
-                              );
-                            })}
-                          </Table.Tbody>
-                        </Table>
-
-                        {selectedResult && (
-                          <Card withBorder radius="md" className="preview-card">
-                            <Stack gap="sm">
-                              <Group justify="space-between">
-                                <Text fw={600}>选中结果预览</Text>
-                                <Button
-                                  size="xs"
-                                  variant="light"
-                                  leftSection={<IconCopy size={14} />}
-                                  onClick={() => navigator.clipboard.writeText(selectedResult.renderedPrompt)}
-                                >
-                                  复制结果
-                                </Button>
-                              </Group>
-                              <Textarea value={selectedResult.renderedPrompt} minRows={6} readOnly />
-                              <Stack gap={4}>
-                                {selectedResult.checks.map((check) => (
-                                  <Text size="sm" key={`${selectedResult.testCaseId}-${check.id}`}>
-                                    {check.passed ? '通过' : '失败'} | {check.label}
-                                    {check.detail ? ` | ${check.detail}` : ''}
-                                  </Text>
-                                ))}
-                              </Stack>
-                            </Stack>
-                          </Card>
-                        )}
-                      </>
-                    )}
-                  </Stack>
-                </Card>
-
-                <Card className="lab-card reveal reveal-3" withBorder radius="lg" p="lg">
-                  <Stack gap="sm">
-                    <Title order={4}>版本管理</Title>
-                    <TextInput
-                      label="新版本名称"
-                      placeholder="例如：v1.2 加强输出约束"
-                      value={versionName}
-                      onChange={(event) => setVersionName(event.currentTarget.value)}
-                    />
-                    <Text size="sm" c="dimmed">
-                      已保存版本：{versions.length}
+                  {selectedEval ? (
+                    <Stack gap="sm" mt="md">
+                      <Group justify="space-between" align="flex-end">
+                        <TextInput
+                          label="Case name"
+                          value={selectedEval.name}
+                          onChange={(event) =>
+                            updateEvalCase(selectedEval.id, { name: event.currentTarget.value })
+                          }
+                          className="grow-field"
+                        />
+                        <ActionIcon
+                          aria-label="Delete eval case"
+                          color="red"
+                          variant="light"
+                          onClick={() => deleteEvalCase(selectedEval.id)}
+                        >
+                          <IconTrash size={16} />
+                        </ActionIcon>
+                      </Group>
+                      <Textarea
+                        label="User request"
+                        value={selectedEval.userRequest}
+                        minRows={3}
+                        autosize
+                        onChange={(event) =>
+                          updateEvalCase(selectedEval.id, {
+                            userRequest: event.currentTarget.value,
+                          })
+                        }
+                      />
+                      <Textarea
+                        label="Expected outcome"
+                        value={selectedEval.expectedOutcome}
+                        minRows={2}
+                        autosize
+                        onChange={(event) =>
+                          updateEvalCase(selectedEval.id, {
+                            expectedOutcome: event.currentTarget.value,
+                          })
+                        }
+                      />
+                      <Textarea
+                        label="Assertions"
+                        value={joinLines(selectedEval.assertions)}
+                        minRows={3}
+                        autosize
+                        onChange={(event) =>
+                          updateEvalCase(selectedEval.id, {
+                            assertions: splitLines(event.currentTarget.value),
+                          })
+                        }
+                      />
+                      <Textarea
+                        label="Required evidence"
+                        value={joinLines(selectedEval.requiredEvidence)}
+                        minRows={2}
+                        autosize
+                        onChange={(event) =>
+                          updateEvalCase(selectedEval.id, {
+                            requiredEvidence: splitLines(event.currentTarget.value),
+                          })
+                        }
+                      />
+                    </Stack>
+                  ) : (
+                    <Text size="sm" c="dimmed" mt="md">
+                      Add an eval case to begin.
                     </Text>
-                    <Group grow>
-                      <Select
-                        label="基准版本"
-                        data={versionOptions}
-                        value={baseVersionId}
-                        onChange={setBaseVersionId}
-                        placeholder="选择基准"
-                      />
-                      <Select
-                        label="对比版本"
-                        data={versionOptions}
-                        value={targetVersionId}
-                        onChange={setTargetVersionId}
-                        placeholder="选择对比"
-                      />
-                    </Group>
-                    {comparison ? (
-                      <Stack gap={4}>
-                        <Text size="sm">模板变化：{comparison.templateChanged ? '有' : '无'}</Text>
-                        <Text size="sm">新增变量：{comparison.addedVariables.join('、') || '无'}</Text>
-                        <Text size="sm">删除变量：{comparison.removedVariables.join('、') || '无'}</Text>
-                      </Stack>
-                    ) : (
-                      <Text size="sm" c="dimmed">
-                        请选择两个不同版本以查看差异。
-                      </Text>
-                    )}
-                  </Stack>
-                </Card>
+                  )}
+                </section>
+
+                <section className="studio-panel">
+                  <Title order={4} mb="sm">
+                    Eval Results
+                  </Title>
+                  {selectedResult ? (
+                    <Tabs defaultValue="checks" keepMounted={false}>
+                      <Tabs.List>
+                        <Tabs.Tab value="checks">Checks</Tabs.Tab>
+                        <Tabs.Tab value="run-card">Run Card</Tabs.Tab>
+                      </Tabs.List>
+
+                      <Tabs.Panel value="checks" pt="sm">
+                        <ScrollArea h={260}>
+                          <Stack gap="xs">
+                            {selectedResult.checks.map((check) => (
+                              <div className="check-row" key={check.id}>
+                                <Badge
+                                  size="sm"
+                                  color={check.passed ? 'dark' : 'red'}
+                                  variant="light"
+                                >
+                                  {check.passed ? 'Pass' : 'Fix'}
+                                </Badge>
+                                <div>
+                                  <Text size="sm" fw={600}>
+                                    {check.label}
+                                  </Text>
+                                  {check.detail ? (
+                                    <Text size="xs" c="dimmed">
+                                      {check.detail}
+                                    </Text>
+                                  ) : null}
+                                </div>
+                              </div>
+                            ))}
+                          </Stack>
+                        </ScrollArea>
+                      </Tabs.Panel>
+
+                      <Tabs.Panel value="run-card" pt="sm">
+                        <Textarea value={selectedResult.runCard} minRows={11} readOnly />
+                      </Tabs.Panel>
+                    </Tabs>
+                  ) : (
+                    <Text size="sm" c="dimmed">
+                      Run evals to see readiness checks.
+                    </Text>
+                  )}
+                </section>
               </Stack>
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 12, lg: 7 }}>
+              <section className="studio-panel">
+                <Group justify="space-between" mb="sm">
+                  <Title order={4}>Resources</Title>
+                  <Button
+                    size="xs"
+                    variant="light"
+                    leftSection={<IconPlus size={14} />}
+                    onClick={addResource}
+                  >
+                    Add
+                  </Button>
+                </Group>
+
+                <div className="resource-list">
+                  <div className="resource-heading">
+                    <Text size="xs" fw={800}>
+                      Kind
+                    </Text>
+                    <Text size="xs" fw={800}>
+                      Path
+                    </Text>
+                    <Text size="xs" fw={800}>
+                      Purpose
+                    </Text>
+                    <span />
+                  </div>
+                  {skill.resources.map((resource) => (
+                    <div className="resource-row" key={resource.id}>
+                      <Select
+                        className="resource-kind"
+                        data={[
+                          { value: 'reference', label: resourceLabel('reference') },
+                          { value: 'script', label: resourceLabel('script') },
+                          { value: 'asset', label: resourceLabel('asset') },
+                        ]}
+                        value={resource.kind}
+                        onChange={(value) =>
+                          updateResource(resource.id, {
+                            kind: (value ?? 'reference') as SkillResourceKind,
+                          })
+                        }
+                      />
+                      <TextInput
+                        className="resource-path"
+                        value={resource.path}
+                        onChange={(event) =>
+                          updateResource(resource.id, { path: event.currentTarget.value })
+                        }
+                      />
+                      <TextInput
+                        className="resource-purpose"
+                        value={resource.purpose}
+                        onChange={(event) =>
+                          updateResource(resource.id, { purpose: event.currentTarget.value })
+                        }
+                      />
+                      <ActionIcon
+                        className="resource-action"
+                        aria-label="Delete resource"
+                        color="red"
+                        variant="subtle"
+                        onClick={() => deleteResource(resource.id)}
+                      >
+                        <IconTrash size={16} />
+                      </ActionIcon>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 12, lg: 5 }}>
+              <section className="studio-panel">
+                <Group justify="space-between" mb="sm">
+                  <Title order={4}>Versions</Title>
+                  <Badge variant="light" color="gray">
+                    {versions.length} snapshots
+                  </Badge>
+                </Group>
+
+                <TextInput
+                  label="Snapshot name"
+                  placeholder="v0.2 eval-ready release-review"
+                  value={versionName}
+                  onChange={(event) => setVersionName(event.currentTarget.value)}
+                  mb="sm"
+                />
+
+                <Group grow align="flex-start">
+                  <Select
+                    label="Base"
+                    data={versionOptions}
+                    value={baseVersionId}
+                    onChange={setBaseVersionId}
+                    placeholder="Select base"
+                  />
+                  <Select
+                    label="Target"
+                    data={versionOptions}
+                    value={targetVersionId}
+                    onChange={setTargetVersionId}
+                    placeholder="Select target"
+                  />
+                </Group>
+
+                {versionDiff ? (
+                  <div className="version-diff">
+                    <Group gap="xs">
+                      <IconGitCompare size={16} />
+                      <Text size="sm" fw={700}>
+                        Score delta {versionDiff.scoreDelta >= 0 ? '+' : ''}
+                        {versionDiff.scoreDelta}%
+                      </Text>
+                    </Group>
+                    <Text size="sm">Metadata changed: {versionDiff.metadataChanged ? 'Yes' : 'No'}</Text>
+                    <Text size="sm">Instructions changed: {versionDiff.bodyChanged ? 'Yes' : 'No'}</Text>
+                    <Text size="sm">
+                      Added resources: {versionDiff.addedResources.join(', ') || 'None'}
+                    </Text>
+                    <Text size="sm">
+                      Removed resources: {versionDiff.removedResources.join(', ') || 'None'}
+                    </Text>
+                  </div>
+                ) : (
+                  <Text size="sm" c="dimmed" mt="sm">
+                    Select two different snapshots to compare.
+                  </Text>
+                )}
+              </section>
             </Grid.Col>
           </Grid>
         </Container>

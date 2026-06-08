@@ -8,14 +8,14 @@ import './index.css';
 
 const theme = createTheme({
   fontFamily:
-    "'HarmonyOS Sans SC', 'Source Han Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif",
+    "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
   headings: {
     fontFamily:
-      "'Source Han Sans SC', 'HarmonyOS Sans SC', 'PingFang SC', 'Microsoft YaHei', sans-serif",
+      "Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
     fontWeight: '700',
   },
-  primaryColor: 'teal',
-  defaultRadius: 'md',
+  primaryColor: 'orange',
+  defaultRadius: 'xs',
 });
 
 ReactDOM.createRoot(document.getElementById('root')!).render(

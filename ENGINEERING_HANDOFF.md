@@ -1,256 +1,106 @@
-# Prompt Lab - Engineering Handoff
+# SkillOps Studio - Engineering Handoff
 
-## 1. Project Goal
+## 1. Product Goal
 
-Build a local-first Prompt engineering workbench that helps teams produce prompts that are:
+Build a local-first workbench for Agent Skill development.
 
-- Reusable: template + variable contract
-- Verifiable: test cases + automated checks
-- Iterative: version snapshots + version comparison
+The app should help users create and harden reusable skills before those skills are installed into Codex, Claude Code, or another Agent Skills-compatible client.
 
-This project is **not** a visual text-splicing toy. The core value is Prompt QA and controlled iteration.
+The current MVP is deliberately lightweight:
 
-## 2. Product Definition
+- Author a standards-friendly `SKILL.md` draft.
+- Track scripts, references, and assets as resource metadata.
+- Define eval cases with assertions and required evidence.
+- Run deterministic readiness checks.
+- Save snapshots and compare versions.
 
-### Target users
+## 2. Current Scope
 
-- Prompt engineers
-- AI application developers
-- Product owners who need stable prompt behavior
+### In scope
 
-### Core user problem
+- Local Skill draft editing.
+- Generated `SKILL.md` preview.
+- Resource inventory.
+- Eval case editing.
+- Static readiness checks.
+- Snapshot and diff.
+- `localStorage` persistence.
 
-Users currently cannot answer:
+### Out of scope for this refactor
 
-- Which prompt version is better?
-- What changed between versions?
-- Did new changes break known scenarios?
+- Model API execution.
+- Real agent execution.
+- Script execution.
+- Skill sandboxing.
+- Trace-conditioned automatic skill repair.
+- Full folder import/export.
 
-### MVP outcome
+## 3. Active Modules
 
-A user can create one prompt template, define variables, run multiple test cases, inspect pass/fail checks, save versions, and compare two versions.
+- `src/App.tsx`: main UI and interaction orchestration.
+- `src/types/skillOps.ts`: domain types for skills, evals, results, and versions.
+- `src/domain/skillEvaluation.ts`: `SKILL.md` generation, eval run-card generation, and readiness checks.
+- `src/domain/skillVersioning.ts`: snapshot creation and version diff.
+- `src/storage/skillOpsStorage.ts`: `localStorage` read/write.
 
-## 3. Current State (As Implemented)
+The previous prompt-lab modules were removed during the SkillOps refactor.
 
-### Existing modules
+## 4. Readiness Checks
 
-- `src/App.tsx`: primary UI and orchestration
-- `src/domain/template.ts`: variable extraction and template rendering
-- `src/domain/evaluation.ts`: test checks and scoring
-- `src/domain/versioning.ts`: version snapshot and diff
-- `src/storage/promptLabStorage.ts`: localStorage read/write
-- `src/types/promptLab.ts`: core domain types
+Current eval scoring is deterministic. It checks:
 
-### Existing features
+- Portable kebab-case skill name.
+- Specific routing description.
+- Workflow language in instructions.
+- Validation or evidence language in instructions.
+- Complete resource metadata.
+- Realistic eval request.
+- Expected outcome.
+- At least two measurable assertions.
+- Keyword overlap between routing text and eval request.
+- Review language when risky terms appear.
 
-- Template editor with `{{variable}}` placeholders
-- Variable contract editor (required/default/description)
-- Test case management
-- Test run results with rule-based checks
-- Version save and compare (template changed, variable add/remove)
-- Local persistence
+This is not a replacement for real agent evals. It is a fast authoring guardrail.
 
-### Known constraints
+## 5. Architecture Direction
 
-- No backend API
-- No model execution API
-- Local-only persistence (browser localStorage)
+The next clean split should be:
 
-## 4. Target Architecture
+1. `ui/`: presentational components.
+2. `application/`: state transitions, import/export, run orchestration.
+3. `domain/`: pure skill/eval/version logic.
+4. `infrastructure/`: storage, filesystem export, future API adapters.
 
-### Layering
+Current `App.tsx` is still the composition point and contains state updates. That is acceptable for this lightweight refactor, but it should be decomposed before adding heavier workflows.
 
-1. `ui/`: presentational components only
-2. `application/`: use-case orchestration and state transition
-3. `domain/`: pure functions (template, checks, scoring, versioning)
-4. `infrastructure/`: storage and future API adapters
+## 6. Suggested Backlog
 
-### Dependency rule
+1. `test-001`: Add Vitest and unit tests for `skillEvaluation.ts`.
+2. `test-002`: Add unit tests for `skillVersioning.ts`.
+3. `export-001`: Export current state as JSON.
+4. `export-002`: Export Agent Skill folder structure.
+5. `ux-001`: Add failed-check filter.
+6. `version-001`: Add baseline run history and per-eval score deltas.
+7. `security-001`: Add stronger static linter for risky commands, network egress, dependency installation, and credentials.
+8. `import-001`: Import existing `SKILL.md` folders.
+9. `trace-001`: Accept agent run logs and suggest skill revisions.
 
-- `ui` can depend on `application` and types
-- `application` can depend on `domain` and `infrastructure`
-- `domain` must stay pure and framework-agnostic
-- `infrastructure` should not depend on `ui`
+## 7. Quality Gates
 
-### Immediate structural refactor
+- `npm run lint` passes.
+- `npm run build` passes.
+- README stays English.
+- No runtime feature should execute untrusted scripts without a security design.
+- Any future schema change should include a migration path for `localStorage`.
 
-- Split `src/App.tsx` into:
-  - `src/ui/pages/PromptLabPage.tsx`
-  - `src/ui/components/*`
-  - `src/application/promptLabService.ts`
-  - `src/application/promptLabStore.ts`
+## 8. Manual Smoke Flow
 
-## 5. Engineering TODO (Execution Order)
-
-## Phase 0 - Stability and Build Hygiene
-
-- [ ] Install and lock dependencies
-- [ ] Pass `npm run lint`
-- [ ] Pass `npm run build`
-- [ ] Remove unused dependencies in `package.json`
-- [ ] Add `npm run test` script and baseline test runner
-
-## Phase 1 - Domain Reliability
-
-- [ ] Add unit tests for `extractVariableNames`
-- [ ] Add unit tests for `renderTemplate` including regex-special variable names
-- [ ] Add unit tests for unresolved token detection
-- [ ] Add unit tests for all checks in `evaluation.ts`
-- [ ] Add unit tests for scoring aggregation
-- [ ] Add unit tests for version diff logic
-
-Acceptance criteria:
-
-- Pure domain functions have deterministic tests
-- No regressions when changing templates or variable names
-
-## Phase 2 - Application Layer Refactor
-
-- [ ] Move state mutations out of `App.tsx`
-- [ ] Introduce centralized store (Zustand or reducer-based store)
-- [ ] Add typed action creators for all state changes
-- [ ] Add selectors for derived state (scores, selected result, comparison)
-
-Acceptance criteria:
-
-- `App.tsx` becomes composition-only
-- No direct business logic inside UI components
-
-## Phase 3 - UX and Workflow Hardening
-
-- [ ] Add run history timeline (timestamp + average score)
-- [ ] Add per-check filter (show only failed)
-- [ ] Add one-click duplicate test case
-- [ ] Add unsaved-change indicators
-- [ ] Add destructive action confirmation for delete actions
-
-Acceptance criteria:
-
-- User can isolate failures quickly
-- User cannot accidentally lose key work
-
-## Phase 4 - Versioning and Regression Baseline
-
-- [ ] Introduce "baseline version"
-- [ ] Compare current run against baseline run score
-- [ ] Show per-case delta (`+/- score`)
-- [ ] Add changelog notes for each version
-
-Acceptance criteria:
-
-- Teams can identify whether changes improved or degraded quality
-
-## Phase 5 - Collaboration and Export
-
-- [ ] Export/import project state as JSON
-- [ ] Export run reports as Markdown
-- [ ] Add schema version to exported data
-- [ ] Build migration path for old schemas
-
-Acceptance criteria:
-
-- Another engineer can transfer state between machines safely
-
-## 6. Implementation Plan (Concrete)
-
-### Step A: Testing setup
-
-1. Add `vitest` and `@testing-library/react`
-2. Add `test` script and base config
-3. Create `src/domain/*.test.ts`
-
-### Step B: File decomposition
-
-1. Extract result table, case editor, variable table, version panel into separate components
-2. Keep each component stateless where possible
-3. Keep all mutation logic in store/service
-
-### Step C: Safety rails
-
-1. Add guard for empty test suite before run
-2. Add guard for invalid min/max length
-3. Add explicit error state UI for corrupted local storage
-
-### Step D: Regression workflow
-
-1. Save snapshot of run results when version is created
-2. Compute delta between active run and baseline snapshot
-3. Visualize red/green trend
-
-## 7. Definition of Done (DoD)
-
-Feature is complete only when:
-
-- Code compiles and lints
-- Domain tests pass
-- Manual QA checklist passes
-- README and this handoff file are updated
-- No hidden side effects in local storage format
-
-## 8. Quality Gates
-
-- Lint: zero errors
-- Build: success
-- Unit test coverage target for domain layer: >= 85%
-- Critical flows manually verified:
-  - Create template and sync variables
-  - Run multiple test cases
-  - Save and compare versions
-  - Reload page and recover state
-
-## 9. Risks and Mitigations
-
-- Risk: UI and domain logic become coupled again  
-  Mitigation: enforce layering and code-owner review for `src/domain/*`
-
-- Risk: localStorage schema breaks old data  
-  Mitigation: add schema version and migration function
-
-- Risk: false confidence from weak checks  
-  Mitigation: make checks configurable and add manual score field
-
-## 10. Suggested Backlog Tickets
-
-1. `infra-001`: Add vitest and baseline test suite
-2. `domain-001`: Template render edge-case tests
-3. `domain-002`: Evaluation scoring refactor and tests
-4. `app-001`: Split App page into modular components
-5. `app-002`: Add centralized state store
-6. `ux-001`: Failed-check focused view
-7. `version-001`: Baseline + delta comparison
-8. `export-001`: JSON import/export with schema version
-
-## 11. Developer Onboarding Checklist
-
-1. Install dependencies: `npm install`
-2. Run dev: `npm run dev`
-3. Run lint: `npm run lint`
-4. Run build: `npm run build`
-5. Read:
-   - `README.md`
-   - `ENGINEERING_HANDOFF.md`
-   - `src/types/promptLab.ts`
-   - `src/domain/*`
-6. Verify manual smoke flow:
-   - Edit template
-   - Sync variables
-   - Add case
-   - Run tests
-   - Save version
-   - Compare versions
-
-## 12. North Star Metrics
-
-- Template reuse rate (same template used multiple times)
-- Pass rate trend across versions
-- Mean time to diagnose failing case
-- Number of regression failures caught before release
-
-## 13. End-State Vision
-
-Prompt Lab should become the "CI for prompts" in a lightweight local-first form:
-
-- Every template is testable
-- Every change is comparable
-- Every regression is visible
-- Any engineer can continue work without rediscovering intent
+1. Edit the skill name and description.
+2. Edit the instruction body.
+3. Add or update a resource.
+4. Add an eval case.
+5. Run evals.
+6. Inspect check results and run card.
+7. Save a snapshot.
+8. Change the skill and save another snapshot.
+9. Compare the two versions.
